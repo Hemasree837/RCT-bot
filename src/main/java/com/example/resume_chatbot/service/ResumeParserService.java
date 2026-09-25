@@ -185,37 +185,48 @@ public class ResumeParserService {
         String lower = filename.toLowerCase();
 
         try {
-            if (lower.endsWith(".pdf") || (contentType != null && contentType.toLowerCase().contains("pdf"))) {
-                return extractTextFromPdf(is);
-            } else if (lower.endsWith(".docx") || lower.endsWith(".doc") || (contentType != null && (contentType.toLowerCase().contains("word") || contentType.toLowerCase().contains("officedocument")))) {
-                return extractTextFromDoc(is, filename);
-            } else if (lower.endsWith(".txt") || (contentType != null && contentType.toLowerCase().startsWith("text"))) {
-                // read as plain text
-                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                byte[] data = new byte[8192];
-                int nRead;
-                int totalBytes = 0;
-                while ((nRead = is.read(data, 0, data.length)) != -1) {
-                    totalBytes += nRead;
-                    if (totalBytes > MAX_FILE_SIZE_BYTES) {
-                        throw new ResumeParsingException("Uploaded file exceeds the maximum allowed size of 10MB.");
-                    }
-                    buffer.write(data, 0, nRead);
+            // Buffer the incoming stream so we can probe with multiple extractors without losing data
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            byte[] data = new byte[8192];
+            int nRead;
+            int totalBytes = 0;
+            while ((nRead = is.read(data, 0, data.length)) != -1) {
+                totalBytes += nRead;
+                if (totalBytes > MAX_FILE_SIZE_BYTES) {
+                    throw new ResumeParsingException("Uploaded file exceeds the maximum allowed size of 10MB.");
                 }
-                String text = new String(buffer.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+                buffer.write(data, 0, nRead);
+            }
+
+            byte[] bytes = buffer.toByteArray();
+            if (bytes.length == 0) {
+                throw new ResumeParsingException("The uploaded file is empty.");
+            }
+
+            // Use a fresh InputStream for each extractor
+            if (lower.endsWith(".pdf") || (contentType != null && contentType.toLowerCase().contains("pdf"))) {
+                return extractTextFromPdf(new java.io.ByteArrayInputStream(bytes));
+            } else if (lower.endsWith(".docx") || lower.endsWith(".doc") || (contentType != null && (contentType.toLowerCase().contains("word") || contentType.toLowerCase().contains("officedocument")))) {
+                return extractTextFromDoc(new java.io.ByteArrayInputStream(bytes), filename);
+            } else if (lower.endsWith(".txt") || (contentType != null && contentType.toLowerCase().startsWith("text"))) {
+                String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
                 if (text == null || text.trim().isEmpty()) {
                     throw new ResumeParsingException("The uploaded text file is empty or unreadable.");
                 }
                 return text;
             } else {
-                // fallback: try DOCX/DOC first then PDF
+                // Try DOC/DOCX first, then PDF, then plain-text fallback
                 try {
-                    return extractTextFromDoc(is, filename);
-                } catch (Exception ex) {
-                    // rewind not possible; best-effort: try reading as text
-                    try (InputStream is2 = new java.io.ByteArrayInputStream(new byte[0])) {
-                        return extractTextFromDoc(is, filename);
-                    } catch (Exception ex2) {
+                    return extractTextFromDoc(new java.io.ByteArrayInputStream(bytes), filename);
+                } catch (Exception exDoc) {
+                    try {
+                        return extractTextFromPdf(new java.io.ByteArrayInputStream(bytes));
+                    } catch (Exception exPdf) {
+                        // final fallback: try plain text
+                        String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                        if (text != null && !text.trim().isEmpty()) {
+                            return text;
+                        }
                         throw new ResumeParsingException("Unsupported file format. Please upload PDF, DOCX, DOC, or TXT.");
                     }
                 }
@@ -228,7 +239,7 @@ public class ResumeParserService {
     }
 
     /**
-     * Parses raw resume text into structured Resume model.
+     
      */
     public Resume parseResume(String rawText, String filename) {
         if (rawText == null || rawText.isBlank()) {
