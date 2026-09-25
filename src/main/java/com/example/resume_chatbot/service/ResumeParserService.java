@@ -149,9 +149,10 @@ public class ResumeParserService {
             String lower = filename != null ? filename.toLowerCase() : "";
 
             if (lower.endsWith(".docx")) {
-                try (XWPFDocument document = new XWPFDocument(POIXMLDocument.openPackage(new java.io.ByteArrayInputStream(bytes)))) {
-                    XWPFWordExtractor extractor = new XWPFWordExtractor(document);
-                    text = extractor.getText();
+                try (XWPFDocument document = new XWPFDocument(new java.io.ByteArrayInputStream(bytes))) {
+                    try (XWPFWordExtractor extractor = new XWPFWordExtractor(document)) {
+                        text = extractor.getText();
+                    }
                 }
             } else if (lower.endsWith(".doc")) {
                 try (HWPFDocument document = new HWPFDocument(new java.io.ByteArrayInputStream(bytes))) {
@@ -202,11 +203,17 @@ public class ResumeParserService {
             if (bytes.length == 0) {
                 throw new ResumeParsingException("The uploaded file is empty.");
             }
+            // Prefer detection by file signature (magic bytes) when available
+            boolean looksLikePdf = looksLikePdf(bytes);
+            boolean looksLikeDocx = looksLikeDocx(bytes);
+            boolean looksLikeDoc = looksLikeDoc(bytes);
 
             // Use a fresh InputStream for each extractor
-            if (lower.endsWith(".pdf") || (contentType != null && contentType.toLowerCase().contains("pdf"))) {
+            if (looksLikePdf || lower.endsWith(".pdf") || (contentType != null && contentType.toLowerCase().contains("pdf"))) {
                 return extractTextFromPdf(new java.io.ByteArrayInputStream(bytes));
-            } else if (lower.endsWith(".docx") || lower.endsWith(".doc") || (contentType != null && (contentType.toLowerCase().contains("word") || contentType.toLowerCase().contains("officedocument")))) {
+            } else if (looksLikeDocx || lower.endsWith(".docx") || (contentType != null && (contentType.toLowerCase().contains("word") || contentType.toLowerCase().contains("officedocument")))) {
+                return extractTextFromDoc(new java.io.ByteArrayInputStream(bytes), filename);
+            } else if (looksLikeDoc || lower.endsWith(".doc") || (contentType != null && contentType.toLowerCase().contains("msword"))) {
                 return extractTextFromDoc(new java.io.ByteArrayInputStream(bytes), filename);
             } else if (lower.endsWith(".txt") || (contentType != null && contentType.toLowerCase().startsWith("text"))) {
                 String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
@@ -215,27 +222,54 @@ public class ResumeParserService {
                 }
                 return text;
             } else {
-                // Try DOC/DOCX first, then PDF, then plain-text fallback
-                try {
-                    return extractTextFromDoc(new java.io.ByteArrayInputStream(bytes), filename);
-                } catch (Exception exDoc) {
+                // Try the likely options: DOCX/DOC, then PDF, then plain-text fallback
+                if (looksLikeDocx) {
+                    try {
+                        return extractTextFromDoc(new java.io.ByteArrayInputStream(bytes), filename);
+                    } catch (Exception ignored) {}
+                }
+                if (looksLikeDoc) {
+                    try {
+                        return extractTextFromDoc(new java.io.ByteArrayInputStream(bytes), filename);
+                    } catch (Exception ignored) {}
+                }
+                if (looksLikePdf) {
                     try {
                         return extractTextFromPdf(new java.io.ByteArrayInputStream(bytes));
-                    } catch (Exception exPdf) {
-                        // final fallback: try plain text
-                        String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
-                        if (text != null && !text.trim().isEmpty()) {
-                            return text;
-                        }
-                        throw new ResumeParsingException("Unsupported file format. Please upload PDF, DOCX, DOC, or TXT.");
-                    }
+                    } catch (Exception ignored) {}
                 }
+
+                // final fallback: try plain text
+                String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                if (text != null && !text.trim().isEmpty()) {
+                    return text;
+                }
+
+                throw new ResumeParsingException("Unsupported file format. Please upload PDF, DOCX, DOC, or TXT.");
             }
         } catch (ResumeParsingException e) {
             throw e;
         } catch (Exception e) {
             throw new ResumeParsingException("Failed to extract text from file: " + e.getMessage(), e);
         }
+    }
+
+    private boolean looksLikePdf(byte[] bytes) {
+        if (bytes == null || bytes.length < 4) return false;
+        String header = new String(bytes, 0, Math.min(bytes.length, 4), java.nio.charset.StandardCharsets.US_ASCII);
+        return header.startsWith("%PDF");
+    }
+
+    private boolean looksLikeDocx(byte[] bytes) {
+        if (bytes == null || bytes.length < 4) return false;
+        // DOCX files are ZIP archives starting with PK\u0003\u0004
+        return bytes[0] == 'P' && bytes[1] == 'K' && (bytes[2] == 3 || bytes[2] == 5 || bytes[2] == 7) ;
+    }
+
+    private boolean looksLikeDoc(byte[] bytes) {
+        if (bytes == null || bytes.length < 8) return false;
+        // OLE Compound File header for old .doc: D0 CF 11 E0 A1 B1 1A E1
+        return (bytes[0] & 0xFF) == 0xD0 && (bytes[1] & 0xFF) == 0xCF && (bytes[2] & 0xFF) == 0x11 && (bytes[3] & 0xFF) == 0xE0;
     }
 
     /**
